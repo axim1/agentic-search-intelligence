@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import httpx
 from fastapi.testclient import TestClient
 
 from search_intelligence.domain import ProposedToolCall
+from search_intelligence.providers import DataForSEOProvider
 from search_intelligence.tools import validate_proposed_calls
 
 
@@ -112,3 +114,17 @@ def test_graph_join_and_report_execute_once(app_factory, create_profile):
         assert names.count("normalize") == 1
         assert names.count("report") == 1
         assert "serp_retrieval" in names and "ai_retrieval" in names
+
+
+def test_dataforseo_account_verification_error_is_classified():
+    response = httpx.Response(
+        403,
+        json={
+            "status_code": 40104,
+            "status_message": "Please verify your account before using the API.",
+        },
+    )
+    code, message, status = DataForSEOProvider._http_error_details(response)
+    assert code == "dataforseo_account_unverified"
+    assert status == 40104
+    assert "verify" in message.lower()

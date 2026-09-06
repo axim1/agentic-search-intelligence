@@ -115,13 +115,11 @@ class DataForSEOProvider:
             auth=(self.settings.dataforseo_login or "", self.settings.dataforseo_password or ""),
         )
         if response.status_code == 429 or response.status_code >= 500:
-            raise ProviderFailure(
-                "http_transient", "Transient DataForSEO HTTP failure", True, response.status_code
-            )
+            code, message, status = self._http_error_details(response)
+            raise ProviderFailure(code, message, True, status)
         if response.status_code >= 400:
-            raise ProviderFailure(
-                "http_permanent", "DataForSEO rejected the request", False, response.status_code
-            )
+            code, message, status = self._http_error_details(response)
+            raise ProviderFailure(code, message, False, status)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -130,6 +128,31 @@ class DataForSEOProvider:
             ) from exc
         self._validate_envelope(payload)
         return payload
+
+    @staticmethod
+    def _http_error_details(response: httpx.Response) -> tuple[str, str, int]:
+        provider_status: int | None = None
+        provider_message: str | None = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                provider_status = payload.get("status_code")
+                provider_message = payload.get("status_message")
+        except ValueError:
+            pass
+        status = provider_status or response.status_code
+        named_codes = {
+            40100: "dataforseo_unauthorized",
+            40104: "dataforseo_account_unverified",
+            40200: "dataforseo_payment_required",
+            40203: "dataforseo_cost_limit_exceeded",
+        }
+        fallback_code = "http_transient" if response.status_code >= 500 else "http_permanent"
+        code = named_codes.get(status, fallback_code)
+        message = provider_message or (
+            f"DataForSEO HTTP request failed with status {response.status_code}"
+        )
+        return code, message[:500], status
 
     def _validate_envelope(self, payload: Any) -> None:
         if (

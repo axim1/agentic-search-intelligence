@@ -120,7 +120,14 @@ class PipelineGraph:
                 await model.ainvoke(
                     [
                         SystemMessage(
-                            content=f"Plan at most {state['max_queries'] * 2} retrieval calls. Use each tool for useful search-intelligence evidence. Do not ask the external model to mention the target brand."
+                            content=(
+                                f"Plan at most {state['max_queries'] * 2} retrieval calls. "
+                                "This question compares traditional search and AI visibility, "
+                                "so make one search_google_serp call and one "
+                                "query_chatgpt_visibility call for each selected intent. Choose "
+                                "the arguments yourself. Do not ask the external model to "
+                                "mention the target brand."
+                            )
                         ),
                         HumanMessage(
                             content=f"Profile: {profile.model_dump_json()}\nQuestion: {state['question']}"
@@ -140,9 +147,7 @@ class PipelineGraph:
             base = state["question"].strip()
             intent = f"best {profile.industry}" if profile.industry else base
             proposals = []
-            for keyword in [intent, f"{profile.name} alternatives"][
-                : state["max_queries"]
-            ]:
+            for keyword in [intent, f"{profile.name} alternatives"][: state["max_queries"]]:
                 proposals.extend(
                     [
                         ProposedToolCall(
@@ -247,8 +252,6 @@ class PipelineGraph:
         errors: list[PipelineError] = []
         for result in state.get("serp_results", []) + state.get("ai_results", []):
             if result.outcome != "success" or not result.raw_payload:
-                if result.error:
-                    errors.append(result.error)
                 continue
             try:
                 task_result = result.raw_payload["tasks"][0]["result"]

@@ -6,6 +6,7 @@ import os
 import httpx
 
 BASE = os.getenv("DEMO_BASE_URL", "http://127.0.0.1:8000")
+MAX_QUERIES = int(os.getenv("DEMO_MAX_QUERIES", "2"))
 
 
 def show(label: str, response: httpx.Response) -> dict:
@@ -37,7 +38,7 @@ def main() -> None:
                 f"/api/v1/profiles/{profile_id}/run",
                 json={
                     "question": "How does Surfer SEO show up for best project management software?",
-                    "max_queries": 2,
+                    "max_queries": MAX_QUERIES,
                 },
             ),
         )
