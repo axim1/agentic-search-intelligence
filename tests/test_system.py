@@ -21,6 +21,9 @@ def test_happy_path_all_required_endpoints(app_factory, create_profile):
         assert body["status"] == "completed"
         assert body["coverage"]["planned_calls"] == 4
         assert body["coverage"]["normalized_records"] > 0
+        assert body["insights"]
+        assert all(0 <= insight["relevance"] <= 1 for insight in body["insights"])
+        assert all(0 <= insight["opportunity_score"] <= 1 for insight in body["insights"])
         queries = client.get(f"/api/v1/profiles/{profile_id}/queries").json()
         assert queries["total"] == 4
         assert all("metric_availability" in item for item in queries["items"])
@@ -35,12 +38,28 @@ def test_happy_path_all_required_endpoints(app_factory, create_profile):
 
 
 def test_transient_failure_recovers_with_bounded_retries(app_factory, create_profile):
-    with TestClient(app_factory("transient_then_success")) as client:
+    app = app_factory("transient_then_success")
+    with TestClient(app) as client:
         profile_id = create_profile(client)
         body = client.post(f"/api/v1/profiles/{profile_id}/run", json={"max_queries": 1}).json()
         assert body["status"] == "completed"
         assert body["coverage"]["planned_calls"] == 2
         assert body["coverage"]["api_attempts"] == 4
+        with app.state.service.sessions() as session:
+            from search_intelligence.db import Run
+
+            row = session.get(Run, body["run_uuid"])
+            assert row is not None
+            nodes = row.metrics["nodes"]
+            retrievals = [event for event in nodes if event["node"].endswith("_retrieval")]
+            assert all(event["input_summary"]["calls"] == 1 for event in retrievals)
+            assert all(event["retry_count"] == 1 for event in retrievals)
+            assert all(event["trace_id"] == body["trace_id"] for event in nodes)
+            assert all(event["run_uuid"] == body["run_uuid"] for event in nodes)
+            summary = row.metrics["summary"]
+            assert summary["per_node"]["serp_retrieval"]["success_rate"] == 1.0
+            assert summary["per_node"]["serp_retrieval"]["retry_count"] == 1
+            assert summary["api_calls"]["search_google_serp"]["attempts"] == 2
 
 
 def test_partial_failure_preserves_successful_branch(app_factory, create_profile):
@@ -114,6 +133,21 @@ def test_graph_join_and_report_execute_once(app_factory, create_profile):
         assert names.count("normalize") == 1
         assert names.count("report") == 1
         assert "serp_retrieval" in names and "ai_retrieval" in names
+
+
+def test_profile_status_uses_most_recent_recheck(app_factory, create_profile):
+    app = app_factory()
+    with TestClient(app) as client:
+        profile_id = create_profile(client)
+        full = client.post(f"/api/v1/profiles/{profile_id}/run", json={"max_queries": 1}).json()
+        queries = client.get(f"/api/v1/profiles/{profile_id}/queries").json()
+        app.state.service.settings.mock_scenario = "all_failed"
+        recheck = client.post(f"/api/v1/queries/{queries['items'][0]['query_uuid']}/recheck").json()
+        assert full["status"] == "completed"
+        assert recheck["status"] == "failed"
+        profile = client.get(f"/api/v1/profiles/{profile_id}").json()
+        assert profile["latest_run_status"] == "failed"
+        assert profile["latest_run_kind"] == "recheck"
 
 
 def test_dataforseo_account_verification_error_is_classified():

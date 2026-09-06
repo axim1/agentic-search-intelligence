@@ -96,13 +96,15 @@ def get_profile(
             )
             or 0
         )
-        latest = service.latest_full_run(session, profile.uuid)
+        latest_full = service.latest_full_run(session, profile.uuid)
+        latest = service.latest_run(session, profile.uuid)
         scores: list[float] = []
-        if latest:
+        if latest_full:
             scores = list(
                 session.scalars(
                     select(Query.opportunity_score).where(
-                        Query.originating_run_uuid == latest.uuid, Query.score_available.is_(True)
+                        Query.originating_run_uuid == latest_full.uuid,
+                        Query.score_available.is_(True),
                     )
                 )
             )

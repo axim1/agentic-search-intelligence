@@ -26,48 +26,51 @@ The complete hybrid workflow passed. OpenAI performed real tool-call planning an
 | Recommendation listing | HTTP 200; 2 recommendations |
 | Query recheck | Passed; stable query identity and completed report |
 | Token accounting | Passed; available for full run and recheck |
+| Insight score contract | Passed; relevance and opportunity score returned per insight |
+| Structured node logs | Passed; redacted inputs, outputs, duration, status, retries, run and trace IDs |
+| Run metrics | Passed; per-node rates/latency and per-tool API counts persisted |
 | Secret handling | Passed; `.env` ignored and `.env.example` contains blank placeholders |
 
 ## Full run
 
-- Profile UUID: `1e400072-1f96-47fb-bdf8-716c4ae99b61`
-- Run UUID: `24f25664-969b-468d-94fa-5045400dc7f5`
-- Trace ID: `94384455-0e15-45dd-bbe8-73f93398da22`
+- Profile UUID: `01ed7de7-7d1c-4fc6-9464-156b7ae172f5`
+- Run UUID: `737e33e5-77b1-428e-931f-51156eafdc44`
+- Trace ID: `83a34b32-0964-4ebc-ac73-dbce3865c794`
 - Final status: `completed`
 - Planned / attempted / successful calls: 2 / 2 / 2
 - Failed and rejected calls: 0
 - Normalized records: 4
 - Insights: 2
 - Recommendations: 2
-- Total OpenAI tokens: 1,968
-- Total wall time: approximately 8.28 seconds
+- Total OpenAI tokens: 1,917
+- Total wall time: approximately 9.30 seconds
 
 Node timings:
 
 | Node | Duration |
 |---|---:|
-| `query_planner` | 2,678.90 ms |
-| `validate_plan` | 0.17 ms |
+| `query_planner` | 3,224.09 ms |
+| `validate_plan` | 0.168 ms |
 | `dispatch` | <0.01 ms |
-| `serp_retrieval` | 0.27 ms |
-| `ai_retrieval` | 0.29 ms |
-| `normalize` | 0.23 ms |
-| `analysis` | 5,596.27 ms |
-| `report` | 0.24 ms |
+| `serp_retrieval` | 0.255 ms |
+| `ai_retrieval` | 0.268 ms |
+| `normalize` | 0.224 ms |
+| `analysis` | 6,068.56 ms |
+| `report` | 0.284 ms |
 
 The two retrieval branches ran in the same LangGraph superstep and converged at the normalization barrier.
 
 ## Recheck
 
-- Run UUID: `6432e0f1-3c15-44ff-9489-153255d42c41`
-- Trace ID: `f3f98082-231d-46c0-a01a-6e4a21c822ea`
+- Run UUID: `f1e90590-63f1-4d49-ad56-fd3679c89332`
+- Trace ID: `eb62f4cc-270d-494d-83b8-86504e316dfe`
 - Final status: `completed`
 - Planner: bypassed as designed
 - Planned / attempted / successful calls: 1 / 1 / 1
 - Normalized records: 2
-- Live synthesis duration: 3,829.91 ms
-- Total OpenAI tokens: 910
-- Query UUID remained `5fea2adb-4f64-498d-943d-63bde3f8dee1`
+- Live synthesis duration: 4,213.61 ms
+- Total OpenAI tokens: 922
+- Query UUID remained `f65dbb8f-0057-41cb-a549-a958ffc0aabf`
 
 ## Configuration used for submission/demo
 
@@ -97,7 +100,7 @@ This validates real OpenAI tool selection and synthesis plus the entire applicat
 
 ## Regression verification
 
-- Pytest: 9 passed
+- Pytest: 10 passed
 - Ruff: passed
 - Mypy: passed
 - Live HTTP workflow: passed

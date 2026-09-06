@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 from uuid import uuid4
 
@@ -52,6 +53,14 @@ class PipelineService:
         return session.scalar(
             select(Run)
             .where(Run.profile_uuid == profile_uuid, Run.kind == "full", Run.status != "running")
+            .order_by(desc(Run.started_at), desc(Run.uuid))
+            .limit(1)
+        )
+
+    def latest_run(self, session: Session, profile_uuid: str) -> Run | None:
+        return session.scalar(
+            select(Run)
+            .where(Run.profile_uuid == profile_uuid, Run.status != "running")
             .order_by(desc(Run.started_at), desc(Run.uuid))
             .limit(1)
         )
@@ -144,12 +153,22 @@ class PipelineService:
                     self.graph.graph.ainvoke(initial), timeout=self.settings.run_timeout_seconds + 5
                 )
                 report: Report = state["report"]
-                self._persist_final(state, report, kind, target_query_uuid)
+                metrics = self._build_run_metrics(state, report)
+                self._persist_final(state, report, kind, target_query_uuid, metrics)
                 for event in state.get("node_events", []):
-                    logger.info(
-                        event.model_dump_json(), extra={"trace_id": trace_id, "run_uuid": run_uuid}
+                    logger.info(event.model_dump_json())
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "run_summary",
+                            "run_uuid": run_uuid,
+                            "trace_id": trace_id,
+                            "status": report.status.value,
+                            "metrics": metrics["summary"],
+                        },
+                        separators=(",", ":"),
                     )
-                logger.info(report.model_dump_json(), extra={"event": "run_summary"})
+                )
                 return report
             except Exception as exc:
                 with self.sessions() as session:
@@ -167,8 +186,74 @@ class PipelineService:
                         session.commit()
                 raise
 
+    @staticmethod
+    def _build_run_metrics(state: dict[str, Any], report: Report) -> dict[str, Any]:
+        events = state.get("node_events", [])
+        per_node: dict[str, dict[str, Any]] = {}
+        for event in events:
+            metric = per_node.setdefault(
+                event.node,
+                {
+                    "executions": 0,
+                    "successes": 0,
+                    "failures": 0,
+                    "fallbacks": 0,
+                    "skipped": 0,
+                    "total_duration_ms": 0.0,
+                    "retry_count": 0,
+                },
+            )
+            metric["executions"] += 1
+            metric["total_duration_ms"] += event.duration_ms
+            metric["retry_count"] += event.retry_count
+            if event.status == "success":
+                metric["successes"] += 1
+            elif event.status == "failed":
+                metric["failures"] += 1
+            elif event.status == "fallback":
+                metric["fallbacks"] += 1
+            else:
+                metric["skipped"] += 1
+        for metric in per_node.values():
+            executions = metric["executions"]
+            metric["avg_duration_ms"] = round(metric["total_duration_ms"] / executions, 3)
+            metric["total_duration_ms"] = round(metric["total_duration_ms"], 3)
+            metric["success_rate"] = round(
+                (metric["successes"] + metric["fallbacks"]) / executions, 4
+            )
+            metric["failure_rate"] = round(metric["failures"] / executions, 4)
+
+        results = state.get("serp_results", []) + state.get("ai_results", [])
+        api_calls: dict[str, dict[str, int]] = {}
+        for result in results:
+            metric = api_calls.setdefault(
+                result.tool_name.value,
+                {"logical_calls": 0, "attempts": 0, "retries": 0, "successes": 0, "failures": 0},
+            )
+            metric["logical_calls"] += 1
+            metric["attempts"] += result.attempt_count
+            metric["retries"] += max(0, result.attempt_count - 1)
+            metric["successes" if result.outcome == "success" else "failures"] += 1
+
+        status_counts = Counter(event.status for event in events)
+        return {
+            "coverage": report.coverage.model_dump(),
+            "nodes": [event.model_dump(mode="json") for event in events],
+            "summary": {
+                "node_executions": len(events),
+                "node_status_counts": dict(status_counts),
+                "per_node": per_node,
+                "api_calls": api_calls,
+            },
+        }
+
     def _persist_final(
-        self, state: dict[str, Any], report: Report, kind: str, target_query_uuid: str | None
+        self,
+        state: dict[str, Any],
+        report: Report,
+        kind: str,
+        target_query_uuid: str | None,
+        metrics: dict[str, Any],
     ) -> None:
         with self.sessions() as session:
             run = session.get(Run, report.run_uuid)
@@ -180,10 +265,7 @@ class PipelineService:
             )
             run.report = report.model_dump(mode="json")
             run.errors = [item.model_dump(mode="json") for item in report.errors]
-            run.metrics = {
-                "coverage": report.coverage.model_dump(),
-                "nodes": [item.model_dump(mode="json") for item in state.get("node_events", [])],
-            }
+            run.metrics = metrics
             analyses = {item.query_uuid: item for item in report.query_results}
             if kind == "full":
                 for call in state.get("plan", []):

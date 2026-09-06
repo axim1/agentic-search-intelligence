@@ -150,7 +150,57 @@ Lists use the most recent terminal full run. A recheck does not change which ful
 
 ## Observability
 
-Each node emits a structured terminal event with node name, outcome, duration, retry/count summaries, run UUID, and trace ID. The terminal report includes coverage, API attempt counts, safe typed errors, and modes. Node events and coverage are stored with the run and emitted as logs. Prompts, credentials, authorization headers, and raw provider bodies are excluded from logs.
+Each node emits a structured JSON terminal event with its run UUID, trace ID, node name, outcome, duration, redacted input counts, output counts, and retry count. The terminal report includes coverage, API attempt counts, safe typed errors, and modes. Node events, per-node latency and success/failure rates, and per-tool logical-call/attempt/retry counts are stored with the run and emitted in the final run-summary log. Prompts, profile descriptions, credentials, authorization headers, and raw provider bodies are excluded from logs.
+
+Example from a mock retrieval run (formatted across lines only for readability):
+
+```json
+{
+  "event": "node_finished",
+  "run_uuid": "737e33e5-77b1-428e-931f-51156eafdc44",
+  "trace_id": "83a34b32-0964-4ebc-ac73-dbce3865c794",
+  "node": "serp_retrieval",
+  "status": "success",
+  "duration_ms": 0.255,
+  "input_summary": {
+    "tool_name": "search_google_serp",
+    "calls": 1
+  },
+  "output_summary": {
+    "calls": 1,
+    "failures": 0,
+    "api_attempts": 1
+  },
+  "retry_count": 0
+}
+```
+
+A persisted run metric summary uses this shape:
+
+```json
+{
+  "per_node": {
+    "serp_retrieval": {
+      "executions": 1,
+      "successes": 1,
+      "failures": 0,
+      "avg_duration_ms": 0.255,
+      "success_rate": 1.0,
+      "failure_rate": 0.0,
+      "retry_count": 0
+    }
+  },
+  "api_calls": {
+    "search_google_serp": {
+      "logical_calls": 1,
+      "attempts": 1,
+      "retries": 0,
+      "successes": 1,
+      "failures": 0
+    }
+  }
+}
+```
 
 Production extensions would add OpenTelemetry or LangSmith spans with strict redaction, Prometheus-compatible metrics, dashboards and alerts, durable distributed job ownership, a task queue, request tracing middleware, and storage retention controls. External tracing remains opt-in because profile and evidence content may be confidential.
 
@@ -164,7 +214,7 @@ make typecheck
 make test
 ```
 
-Tests cover the real compiled graph and all required endpoints: happy path, transient recovery, partial fallback, all-failed persistence, invalid tool arguments, filters, HTTP validation, rechecks, and a one-time fan-in/report assertion. Live smoke testing is deliberately excluded from default tests to prevent API spend.
+Tests cover the real compiled graph and all required endpoints: happy path, transient recovery, partial fallback, all-failed persistence, invalid tool arguments, filters, HTTP validation, rechecks, redacted node observability, retry metrics, most-recent-run statistics, and a one-time fan-in/report assertion. Live smoke testing is deliberately excluded from default tests to prevent API spend.
 
 `requirements.lock` records the exact environment used for verification; `make setup` installs it before the editable package.
 

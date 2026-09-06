@@ -131,6 +131,7 @@ class Insight(BaseModel):
     detail: str
     query_uuid: str
     evidence_ids: list[str]
+    relevance: float = Field(ge=0, le=1)
     opportunity_score: float = Field(ge=0, le=1)
 
 
@@ -159,6 +160,8 @@ class AnalysisResult(BaseModel):
 
 class NodeEvent(BaseModel):
     event: str = "node_finished"
+    run_uuid: str
+    trace_id: str
     node: str
     status: Literal["success", "failed", "skipped", "fallback"]
     duration_ms: float

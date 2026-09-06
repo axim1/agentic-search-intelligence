@@ -68,15 +68,22 @@ class PipelineState(TypedDict, total=False):
 def _event(
     node: str,
     started: float,
+    state: PipelineState,
     status: Literal["success", "failed", "skipped", "fallback"] = "success",
+    input_summary: dict[str, Any] | None = None,
+    retry_count: int = 0,
     **out: Any,
 ) -> list[NodeEvent]:
     return [
         NodeEvent(
+            run_uuid=state["run_uuid"],
+            trace_id=state["trace_id"],
             node=node,
             status=status,
             duration_ms=(time.perf_counter() - started) * 1000,
+            input_summary=input_summary or {},
             output_summary=out,
+            retry_count=retry_count,
         )
     ]
 
@@ -172,7 +179,18 @@ class PipelineGraph:
                 )
         update: dict[str, Any] = {
             "proposed_calls": proposals,
-            "node_events": _event("query_planner", started, proposals=len(proposals)),
+            "node_events": _event(
+                "query_planner",
+                started,
+                state,
+                input_summary={
+                    "profile_uuid": profile.uuid,
+                    "question_chars": len(state["question"]),
+                    "max_queries": state["max_queries"],
+                    "llm_mode": self.settings.llm_mode,
+                },
+                proposals=len(proposals),
+            ),
         }
         if self._live_llm and response.usage_metadata:
             update["planner_token_usage"] = dict(response.usage_metadata)
@@ -188,7 +206,12 @@ class PipelineGraph:
             "plan_errors": errors,
             "planning_degraded": bool(errors),
             "node_events": _event(
-                "validate_plan", started, accepted=len(plan), rejected=len(errors)
+                "validate_plan",
+                started,
+                state,
+                input_summary={"proposals": len(state.get("proposed_calls", []))},
+                accepted=len(plan),
+                rejected=len(errors),
             ),
         }
 
@@ -211,16 +234,39 @@ class PipelineGraph:
         return {
             "plan": [call],
             "planning_degraded": True,
-            "node_events": _event("planner_fallback", started, "fallback", calls=1),
+            "node_events": _event(
+                "planner_fallback",
+                started,
+                state,
+                "fallback",
+                input_summary={"rejected_calls": len(state.get("plan_errors", []))},
+                calls=1,
+            ),
         }
 
     async def recheck_seed(self, state: PipelineState) -> dict[str, Any]:
         started = time.perf_counter()
-        return {"node_events": _event("recheck_seed", started, calls=len(state.get("plan", [])))}
+        return {
+            "node_events": _event(
+                "recheck_seed",
+                started,
+                state,
+                input_summary={"saved_calls": len(state.get("plan", []))},
+                calls=len(state.get("plan", [])),
+            )
+        }
 
     async def dispatch(self, state: PipelineState) -> dict[str, Any]:
         started = time.perf_counter()
-        return {"node_events": _event("dispatch", started, calls=len(state["plan"]))}
+        return {
+            "node_events": _event(
+                "dispatch",
+                started,
+                state,
+                input_summary={"validated_calls": len(state["plan"])},
+                calls=len(state["plan"]),
+            )
+        }
 
     async def _retrieve(
         self, state: PipelineState, tool_name: ToolName, node: str
@@ -229,19 +275,34 @@ class PipelineGraph:
         calls = [call for call in state["plan"] if call.tool_name is tool_name]
         if not calls:
             key = "serp_results" if tool_name is ToolName.SERP else "ai_results"
-            return {key: [], "node_events": _event(node, started, "skipped", calls=0)}
+            return {
+                key: [],
+                "node_events": _event(
+                    node,
+                    started,
+                    state,
+                    "skipped",
+                    input_summary={"tool_name": tool_name.value, "calls": 0},
+                    calls=0,
+                ),
+            }
         remaining = max(0.1, state["deadline_monotonic"] - time.monotonic())
         results = await asyncio.gather(*(self.provider.execute(call, remaining) for call in calls))
         key = "serp_results" if tool_name is ToolName.SERP else "ai_results"
         failures = sum(result.outcome == "failed" for result in results)
+        retries = sum(max(0, result.attempt_count - 1) for result in results)
         return {
             key: results,
             "node_events": _event(
                 node,
                 started,
+                state,
                 "failed" if failures == len(results) else "success",
+                input_summary={"tool_name": tool_name.value, "calls": len(calls)},
+                retry_count=retries,
                 calls=len(calls),
                 failures=failures,
+                api_attempts=sum(result.attempt_count for result in results),
             ),
         }
 
@@ -351,7 +412,16 @@ class PipelineGraph:
             "observations": observations,
             "normalization_errors": errors,
             "node_events": _event(
-                "normalize", started, records=len(observations), errors=len(errors)
+                "normalize",
+                started,
+                state,
+                input_summary={
+                    "retrieval_results": len(
+                        state.get("serp_results", []) + state.get("ai_results", [])
+                    )
+                },
+                records=len(observations),
+                errors=len(errors),
             ),
         }
 
@@ -408,6 +478,7 @@ class PipelineGraph:
                         detail=detail,
                         query_uuid=call.query_uuid,
                         evidence_ids=evidence_ids,
+                        relevance=relevance,
                         opportunity_score=score,
                     )
                 )
@@ -441,7 +512,16 @@ class PipelineGraph:
             return {
                 "analysis": baseline,
                 "synthesis_error": None,
-                "node_events": _event("analysis", started, insights=len(baseline.insights)),
+                "node_events": _event(
+                    "analysis",
+                    started,
+                    state,
+                    input_summary={
+                        "planned_calls": len(state["plan"]),
+                        "evidence_records": len(state.get("observations", [])),
+                    },
+                    insights=len(baseline.insights),
+                ),
             }
         try:
             prompt = f"Produce at most five grounded insights and recommendations. Use only these UUIDs and evidence: {baseline.model_dump_json()}"
@@ -453,7 +533,8 @@ class PipelineGraph:
             )
             synthesis = cast(SynthesisPayload, structured["parsed"])
             raw_message = cast(AIMessage, structured["raw"])
-            query_ids = {q.query_uuid for q in baseline.queries}
+            queries_by_id = {q.query_uuid: q for q in baseline.queries}
+            query_ids = set(queries_by_id)
             evidence_ids = {o.uuid for o in state.get("observations", [])}
             if any(
                 i.query_uuid not in query_ids or not set(i.evidence_ids) <= evidence_ids
@@ -465,13 +546,33 @@ class PipelineGraph:
                 for r in synthesis.recommendations
             ):
                 raise ValueError("synthesis referenced unknown query or evidence")
+            for insight in synthesis.insights:
+                query = queries_by_id[insight.query_uuid]
+                insight.relevance = query.relevance
+                insight.opportunity_score = query.opportunity_score
+            for recommendation in synthesis.recommendations:
+                query = queries_by_id[recommendation.target_query_uuid]
+                recommendation.priority = (
+                    recommendation_priority(query.opportunity_score)
+                    if query.score_available
+                    else "low"
+                )
             baseline.insights = synthesis.insights
             baseline.recommendations = synthesis.recommendations
             baseline.synthesis_mode = "llm"
             update: dict[str, Any] = {
                 "analysis": baseline,
                 "synthesis_error": None,
-                "node_events": _event("analysis", started, insights=len(baseline.insights)),
+                "node_events": _event(
+                    "analysis",
+                    started,
+                    state,
+                    input_summary={
+                        "planned_calls": len(state["plan"]),
+                        "evidence_records": len(state.get("observations", [])),
+                    },
+                    insights=len(baseline.insights),
+                ),
             }
             if raw_message.usage_metadata:
                 update["analysis_token_usage"] = dict(raw_message.usage_metadata)
@@ -483,7 +584,17 @@ class PipelineGraph:
             return {
                 "analysis": None,
                 "synthesis_error": error,
-                "node_events": _event("analysis", started, "failed"),
+                "node_events": _event(
+                    "analysis",
+                    started,
+                    state,
+                    "failed",
+                    input_summary={
+                        "planned_calls": len(state["plan"]),
+                        "evidence_records": len(state.get("observations", [])),
+                    },
+                    error_code=error.code,
+                ),
             }
 
     async def analysis_fallback(self, state: PipelineState) -> dict[str, Any]:
@@ -493,7 +604,12 @@ class PipelineGraph:
         return {
             "analysis": result,
             "node_events": _event(
-                "analysis_fallback", started, "fallback", insights=len(result.insights)
+                "analysis_fallback",
+                started,
+                state,
+                "fallback",
+                input_summary={"synthesis_failed": state.get("synthesis_error") is not None},
+                insights=len(result.insights),
             ),
         }
 
@@ -565,7 +681,17 @@ class PipelineGraph:
         )
         return {
             "report": report,
-            "node_events": _event("report", started, status="success", run_status=status.value),
+            "node_events": _event(
+                "report",
+                started,
+                state,
+                input_summary={
+                    "retrieval_results": len(results),
+                    "pipeline_errors": len(errors),
+                },
+                status="success",
+                run_status=status.value,
+            ),
         }
 
     def _build(self):
