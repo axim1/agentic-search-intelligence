@@ -61,6 +61,8 @@ class PipelineState(TypedDict, total=False):
     synthesis_error: PipelineError | None
     report: Report
     node_events: Annotated[list[NodeEvent], operator.add]
+    planner_token_usage: dict[str, int]
+    analysis_token_usage: dict[str, int]
 
 
 def _event(
@@ -168,10 +170,13 @@ class PipelineGraph:
                         ),
                     ]
                 )
-        return {
+        update: dict[str, Any] = {
             "proposed_calls": proposals,
             "node_events": _event("query_planner", started, proposals=len(proposals)),
         }
+        if self._live_llm and response.usage_metadata:
+            update["planner_token_usage"] = dict(response.usage_metadata)
+        return update
 
     async def validate_plan(self, state: PipelineState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -440,10 +445,14 @@ class PipelineGraph:
             }
         try:
             prompt = f"Produce at most five grounded insights and recommendations. Use only these UUIDs and evidence: {baseline.model_dump_json()}"
-            synthesis = cast(
-                SynthesisPayload,
-                await self._live_llm.with_structured_output(SynthesisPayload).ainvoke(prompt),
+            structured = cast(
+                dict[str, Any],
+                await self._live_llm.with_structured_output(
+                    SynthesisPayload, include_raw=True
+                ).ainvoke(prompt),
             )
+            synthesis = cast(SynthesisPayload, structured["parsed"])
+            raw_message = cast(AIMessage, structured["raw"])
             query_ids = {q.query_uuid for q in baseline.queries}
             evidence_ids = {o.uuid for o in state.get("observations", [])}
             if any(
@@ -459,11 +468,14 @@ class PipelineGraph:
             baseline.insights = synthesis.insights
             baseline.recommendations = synthesis.recommendations
             baseline.synthesis_mode = "llm"
-            return {
+            update: dict[str, Any] = {
                 "analysis": baseline,
                 "synthesis_error": None,
                 "node_events": _event("analysis", started, insights=len(baseline.insights)),
             }
+            if raw_message.usage_metadata:
+                update["analysis_token_usage"] = dict(raw_message.usage_metadata)
+            return update
         except Exception as exc:
             error = PipelineError(
                 code="synthesis_failed", stage="analysis", message=type(exc).__name__
@@ -521,6 +533,16 @@ class PipelineGraph:
             api_attempts=sum(item.attempt_count for item in results),
         )
         summary = f"Run {status.value}: {successes} of {len(results)} retrieval calls succeeded; {len(state.get('observations', []))} evidence records were normalized."
+        planner_tokens = state.get("planner_token_usage")
+        analysis_tokens = state.get("analysis_token_usage")
+        usage_complete = bool(analysis_tokens) and (
+            state["run_kind"] == "recheck" or bool(planner_tokens)
+        )
+        total_tokens = None
+        if usage_complete:
+            total_tokens = (planner_tokens or {}).get("total_tokens", 0) + (
+                analysis_tokens or {}
+            ).get("total_tokens", 0)
         report = Report(
             run_uuid=state["run_uuid"],
             profile_uuid=state["profile"].uuid,
@@ -537,6 +559,8 @@ class PipelineGraph:
             summary=summary,
             started_at=state["started_at"],
             finished_at=utcnow(),
+            total_tokens_used=total_tokens,
+            token_usage_available=usage_complete,
             trace_id=state["trace_id"],
         )
         return {
