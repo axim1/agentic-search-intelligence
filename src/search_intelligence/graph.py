@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import operator
 import time
 from typing import Annotated, Any, Literal, TypedDict, cast
@@ -15,6 +16,7 @@ from .config import Settings
 from .domain import (
     AIToolArgs,
     AnalysisResult,
+    AuditEvent,
     Coverage,
     Insight,
     NodeEvent,
@@ -63,6 +65,7 @@ class PipelineState(TypedDict, total=False):
     node_events: Annotated[list[NodeEvent], operator.add]
     planner_token_usage: dict[str, int]
     analysis_token_usage: dict[str, int]
+    audit_events: Annotated[list[AuditEvent], operator.add]
 
 
 def _event(
@@ -86,6 +89,39 @@ def _event(
             retry_count=retry_count,
         )
     ]
+
+
+_SECRET_KEYS = {
+    "authorization",
+    "api_key",
+    "openai_api_key",
+    "dataforseo_login",
+    "dataforseo_password",
+    "password",
+    "secret",
+}
+
+
+def _redact_payload(value: Any, max_chars: int) -> Any:
+    def redact(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                str(key): "[REDACTED]" if str(key).lower() in _SECRET_KEYS else redact(child)
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [redact(child) for child in item]
+        return item
+
+    redacted = redact(value)
+    serialized = json.dumps(redacted, default=str, separators=(",", ":"))
+    if len(serialized) <= max_chars:
+        return redacted
+    return {
+        "truncated": True,
+        "original_chars": len(serialized),
+        "preview": serialized[:max_chars],
+    }
 
 
 def _hostname(url: str | None) -> str | None:
@@ -122,25 +158,32 @@ class PipelineGraph:
     async def query_planner(self, state: PipelineState) -> dict[str, Any]:
         started = time.perf_counter()
         profile = state["profile"]
+        planner_request: list[dict[str, str]] | None = None
         if self._live_llm:
             model = self._live_llm.bind_tools(PLANNER_TOOLS)
+            planner_request = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"Plan at most {state['max_queries'] * 2} retrieval calls. "
+                        "This question compares traditional search and AI visibility, "
+                        "so make one search_google_serp call and one "
+                        "query_chatgpt_visibility call for each selected intent. Choose "
+                        "the arguments yourself. Do not ask the external model to "
+                        "mention the target brand."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Profile: {profile.model_dump_json()}\nQuestion: {state['question']}",
+                },
+            ]
             response = cast(
                 AIMessage,
                 await model.ainvoke(
                     [
-                        SystemMessage(
-                            content=(
-                                f"Plan at most {state['max_queries'] * 2} retrieval calls. "
-                                "This question compares traditional search and AI visibility, "
-                                "so make one search_google_serp call and one "
-                                "query_chatgpt_visibility call for each selected intent. Choose "
-                                "the arguments yourself. Do not ask the external model to "
-                                "mention the target brand."
-                            )
-                        ),
-                        HumanMessage(
-                            content=f"Profile: {profile.model_dump_json()}\nQuestion: {state['question']}"
-                        ),
+                        SystemMessage(content=planner_request[0]["content"]),
+                        HumanMessage(content=planner_request[1]["content"]),
                     ]
                 ),
             )
@@ -194,6 +237,32 @@ class PipelineGraph:
         }
         if self._live_llm and response.usage_metadata:
             update["planner_token_usage"] = dict(response.usage_metadata)
+        if self._live_llm and self.settings.capture_audit_payloads:
+            usage = dict(response.usage_metadata) if response.usage_metadata else None
+            update["audit_events"] = [
+                AuditEvent(
+                    run_uuid=state["run_uuid"],
+                    trace_id=state["trace_id"],
+                    node="query_planner",
+                    provider="openai",
+                    operation="tool_call_planning",
+                    status="success",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    request_payload=_redact_payload(
+                        {
+                            "model": self.settings.llm_model,
+                            "messages": planner_request,
+                            "tools": [tool.name for tool in PLANNER_TOOLS],
+                        },
+                        self.settings.audit_payload_max_chars,
+                    ),
+                    response_payload=_redact_payload(
+                        {"content": response.content, "tool_calls": response.tool_calls},
+                        self.settings.audit_payload_max_chars,
+                    ),
+                    token_usage=usage,
+                )
+            ]
         return update
 
     async def validate_plan(self, state: PipelineState) -> dict[str, Any]:
@@ -291,7 +360,7 @@ class PipelineGraph:
         key = "serp_results" if tool_name is ToolName.SERP else "ai_results"
         failures = sum(result.outcome == "failed" for result in results)
         retries = sum(max(0, result.attempt_count - 1) for result in results)
-        return {
+        update: dict[str, Any] = {
             key: results,
             "node_events": _event(
                 node,
@@ -305,6 +374,31 @@ class PipelineGraph:
                 api_attempts=sum(result.attempt_count for result in results),
             ),
         }
+        if self.settings.capture_audit_payloads:
+            update["audit_events"] = [
+                AuditEvent(
+                    run_uuid=state["run_uuid"],
+                    trace_id=state["trace_id"],
+                    node=node,
+                    provider="dataforseo",
+                    operation=call.tool_name.value,
+                    status="success" if result.outcome == "success" else "failed",
+                    duration_ms=result.duration_ms,
+                    request_payload=_redact_payload(
+                        {"arguments": call.arguments, "mode": result.mode},
+                        self.settings.audit_payload_max_chars,
+                    ),
+                    response_payload=_redact_payload(
+                        result.raw_payload, self.settings.audit_payload_max_chars
+                    )
+                    if result.raw_payload is not None
+                    else None,
+                    attempt_count=result.attempt_count,
+                    error=result.error.model_dump(mode="json") if result.error else None,
+                )
+                for call, result in zip(calls, results, strict=True)
+            ]
+        return update
 
     async def serp_retrieval(self, state: PipelineState) -> dict[str, Any]:
         return await self._retrieve(state, ToolName.SERP, "serp_retrieval")
@@ -576,12 +670,35 @@ class PipelineGraph:
             }
             if raw_message.usage_metadata:
                 update["analysis_token_usage"] = dict(raw_message.usage_metadata)
+            if self.settings.capture_audit_payloads:
+                update["audit_events"] = [
+                    AuditEvent(
+                        run_uuid=state["run_uuid"],
+                        trace_id=state["trace_id"],
+                        node="analysis",
+                        provider="openai",
+                        operation="structured_synthesis",
+                        status="success",
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        request_payload=_redact_payload(
+                            {"model": self.settings.llm_model, "prompt": prompt},
+                            self.settings.audit_payload_max_chars,
+                        ),
+                        response_payload=_redact_payload(
+                            synthesis.model_dump(mode="json"),
+                            self.settings.audit_payload_max_chars,
+                        ),
+                        token_usage=dict(raw_message.usage_metadata)
+                        if raw_message.usage_metadata
+                        else None,
+                    )
+                ]
             return update
         except Exception as exc:
             error = PipelineError(
                 code="synthesis_failed", stage="analysis", message=type(exc).__name__
             )
-            return {
+            update = {
                 "analysis": None,
                 "synthesis_error": error,
                 "node_events": _event(
@@ -596,6 +713,24 @@ class PipelineGraph:
                     error_code=error.code,
                 ),
             }
+            if self.settings.capture_audit_payloads:
+                update["audit_events"] = [
+                    AuditEvent(
+                        run_uuid=state["run_uuid"],
+                        trace_id=state["trace_id"],
+                        node="analysis",
+                        provider="openai",
+                        operation="structured_synthesis",
+                        status="failed",
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        request_payload=_redact_payload(
+                            {"model": self.settings.llm_model, "prompt": prompt},
+                            self.settings.audit_payload_max_chars,
+                        ),
+                        error=error.model_dump(mode="json"),
+                    )
+                ]
+            return update
 
     async def analysis_fallback(self, state: PipelineState) -> dict[str, Any]:
         started = time.perf_counter()

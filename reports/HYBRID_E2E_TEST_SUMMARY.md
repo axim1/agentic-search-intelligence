@@ -98,9 +98,23 @@ DEMO_BASE_URL=http://127.0.0.1:8768 DEMO_MAX_QUERIES=1 make demo
 
 This validates real OpenAI tool selection and synthesis plus the entire application and persistence path. It does not validate live search facts. All visibility positions, citations, and evidence in this run come from the explicitly labeled `mock` DataForSEO fixtures. The separate live-test report records the verified DataForSEO credentials and the external `40104` account-verification blocker.
 
+## Detailed audit verification
+
+Detailed payload capture was enabled for a subsequent live OpenAI hybrid run:
+
+- Run UUID: `fc539764-52e5-4c72-a2b8-0ff257101d4f`
+- Trace ID: `11ef698f-5046-4d7a-b738-6feaaa266e67`
+- Audit records persisted: 4
+- OpenAI planning request/response: captured with tool calls and token usage
+- DataForSEO SERP request/response: captured
+- DataForSEO AI visibility request/response: captured
+- OpenAI synthesis request/response: captured with token usage
+- Authorization headers and credential fields: absent
+- `GET /api/v1/runs/{run_uuid}/logs`: covered by the automated suite
+
 ## Regression verification
 
-- Pytest: 10 passed
+- Pytest: 11 passed
 - Ruff: passed
 - Mypy: passed
 - Live HTTP workflow: passed

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -148,6 +150,35 @@ def test_profile_status_uses_most_recent_recheck(app_factory, create_profile):
         profile = client.get(f"/api/v1/profiles/{profile_id}").json()
         assert profile["latest_run_status"] == "failed"
         assert profile["latest_run_kind"] == "recheck"
+
+
+def test_detailed_provider_audit_payloads_are_opt_in_and_redacted(app_factory, create_profile):
+    app = app_factory()
+    app.state.service.settings.capture_audit_payloads = True
+    with TestClient(app) as client:
+        profile_id = create_profile(client)
+        body = client.post(f"/api/v1/profiles/{profile_id}/run", json={"max_queries": 1}).json()
+        with app.state.service.sessions() as session:
+            from search_intelligence.db import Run
+
+            row = session.get(Run, body["run_uuid"])
+            assert row is not None
+            audits = row.metrics["audit_events"]
+        logs = client.get(f"/api/v1/runs/{body['run_uuid']}/logs")
+        assert logs.status_code == 200
+        assert logs.json()["trace_id"] == body["trace_id"]
+        assert len(logs.json()["audit_events"]) == 2
+        assert len(audits) == 2
+        assert {event["provider"] for event in audits} == {"dataforseo"}
+        assert all(event["request_payload"]["arguments"] for event in audits)
+        assert all(event["response_payload"]["tasks"] for event in audits)
+        serialized = json.dumps(audits).lower()
+        assert "authorization" not in serialized
+        assert "dataforseo_password" not in serialized
+        assert (
+            client.get("/api/v1/runs/00000000-0000-0000-0000-000000000000/logs").status_code
+            == 404
+        )
 
 
 def test_dataforseo_account_verification_error_is_classified():

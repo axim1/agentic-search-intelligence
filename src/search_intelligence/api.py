@@ -251,6 +251,28 @@ async def recheck_query(
         raise HTTPException(409, detail={"code": "profile_busy", "message": str(exc)}) from exc
 
 
+@router.get("/api/v1/runs/{run_uuid}/logs")
+def get_run_logs(
+    run_uuid: UUID, service: PipelineService = Depends(get_service)
+) -> dict[str, Any]:
+    with service.sessions() as session:
+        run = session.get(Run, _uuid(run_uuid))
+        if not run:
+            raise HTTPException(404, detail={"code": "not_found", "message": "Run not found"})
+        metrics = run.metrics or {}
+        return {
+            "run_uuid": run.uuid,
+            "trace_id": run.trace_id,
+            "status": run.status,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "node_events": metrics.get("nodes", []),
+            "metric_summary": metrics.get("summary", {}),
+            "audit_events": metrics.get("audit_events", []),
+            "errors": run.errors,
+        }
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

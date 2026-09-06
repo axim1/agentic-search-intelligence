@@ -170,6 +170,22 @@ class NodeEvent(BaseModel):
     retry_count: int = 0
 
 
+class AuditEvent(BaseModel):
+    event: str = "provider_audit"
+    run_uuid: str
+    trace_id: str
+    node: str
+    provider: Literal["openai", "dataforseo"]
+    operation: str
+    status: Literal["success", "failed"]
+    duration_ms: float
+    request_payload: Any
+    response_payload: Any | None = None
+    attempt_count: int = 1
+    token_usage: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
 class Coverage(BaseModel):
     planned_calls: int
     attempted_calls: int

@@ -202,6 +202,29 @@ A persisted run metric summary uses this shape:
 }
 ```
 
+Detailed provider payload auditing is opt-in because prompts and responses can contain confidential business information. Enable it with:
+
+```dotenv
+CAPTURE_AUDIT_PAYLOADS=true
+AUDIT_PAYLOAD_MAX_CHARS=50000
+```
+
+When enabled, `runs.metrics.audit_events` and the terminal JSON logs include:
+
+- OpenAI planning messages, allowed tool names, returned tool calls, model, duration, and token usage
+- OpenAI synthesis prompt, validated structured response, model, duration, token usage, and safe errors
+- DataForSEO tool arguments, mode, raw response envelope, duration, attempt count, and safe errors
+
+Credentials and authorization headers are never added to audit events. Large payloads are replaced by a bounded preview with `truncated=true`. Keep detailed capture disabled unless it is needed for debugging, restrict access to the SQLite database and logs, and apply a retention period in production.
+
+Inspect a run's node logs, metric summary, errors, and detailed audit events through the local API:
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/runs/RUN_UUID/logs
+```
+
+The detailed endpoint is intended for this local assessment. Protect it with authentication and role-based access before exposing it in a shared or production environment.
+
 Production extensions would add OpenTelemetry or LangSmith spans with strict redaction, Prometheus-compatible metrics, dashboards and alerts, durable distributed job ownership, a task queue, request tracing middleware, and storage retention controls. External tracing remains opt-in because profile and evidence content may be confidential.
 
 ## Verification

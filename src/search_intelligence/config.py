@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     port: int = 8000
     database_url: str = "sqlite:///./data/search_intelligence.db"
     log_level: str = "INFO"
+    capture_audit_payloads: bool = False
+    audit_payload_max_chars: int = Field(50000, ge=1000, le=500000)
     dataforseo_mode: Literal["mock", "live"] = "mock"
     mock_scenario: Literal[
         "happy_path", "transient_then_success", "partial_failure", "all_failed"

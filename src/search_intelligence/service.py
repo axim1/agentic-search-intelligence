@@ -145,6 +145,7 @@ class PipelineService:
                 "started_at": utcnow(),
                 "deadline_monotonic": time.monotonic() + self.settings.run_timeout_seconds,
                 "node_events": [],
+                "audit_events": [],
             }
             if plan is not None:
                 initial["plan"] = plan
@@ -156,6 +157,8 @@ class PipelineService:
                 metrics = self._build_run_metrics(state, report)
                 self._persist_final(state, report, kind, target_query_uuid, metrics)
                 for event in state.get("node_events", []):
+                    logger.info(event.model_dump_json())
+                for event in state.get("audit_events", []):
                     logger.info(event.model_dump_json())
                 logger.info(
                     json.dumps(
@@ -239,6 +242,9 @@ class PipelineService:
         return {
             "coverage": report.coverage.model_dump(),
             "nodes": [event.model_dump(mode="json") for event in events],
+            "audit_events": [
+                event.model_dump(mode="json") for event in state.get("audit_events", [])
+            ],
             "summary": {
                 "node_executions": len(events),
                 "node_status_counts": dict(status_counts),
